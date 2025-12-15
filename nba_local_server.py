@@ -18,11 +18,13 @@ mcp = FastMCP("nba-local")
 PLAYERS_DF = None
 PLAYER_STATS_DF = None
 GAMES_DF = None
+TEAM_HISTORIES_DF = None
+TEAM_STATS_DF = None
 
 
 def load_data():
     """Load NBA data at startup"""
-    global PLAYERS_DF, PLAYER_STATS_DF, GAMES_DF
+    global PLAYERS_DF, PLAYER_STATS_DF, GAMES_DF, TEAM_HISTORIES_DF, TEAM_STATS_DF
     
     print("Loading NBA data...", file=sys.stderr)
     
@@ -34,6 +36,8 @@ def load_data():
     PLAYERS_DF = pd.read_csv(os.path.join(base_path, "Players.csv"))
     PLAYER_STATS_DF = pd.read_csv(os.path.join(base_path, "PlayerStatistics.csv"), low_memory=False)
     GAMES_DF = pd.read_csv(os.path.join(base_path, "Games.csv"), low_memory=False)
+    TEAM_HISTORIES_DF = pd.read_csv(os.path.join(base_path, "TeamHistories.csv"))
+    TEAM_STATS_DF = pd.read_csv(os.path.join(base_path, "TeamStatistics.csv"), low_memory=False)
     
     # Add normalized player names for easier searching
     PLAYERS_DF["fullName"] = PLAYERS_DF["firstName"] + " " + PLAYERS_DF["lastName"]
@@ -78,9 +82,16 @@ def load_data():
         lambda row: row["year"] - 1 if row["month"] <= 6 else row["year"], axis=1
     )
     
+    # Parse team stats dates
+    TEAM_STATS_DF["gameDate"] = pd.to_datetime(TEAM_STATS_DF["gameDate"], errors='coerce', format='mixed', utc=True)
+    TEAM_STATS_DF["gameDate"] = TEAM_STATS_DF["gameDate"].dt.tz_convert(None)
+    TEAM_STATS_DF = TEAM_STATS_DF[TEAM_STATS_DF["gameDate"].notna()].copy()
+    
     print(f"Loaded {len(PLAYERS_DF)} players", file=sys.stderr)
     print(f"Loaded {len(PLAYER_STATS_DF)} player statistics records", file=sys.stderr)
     print(f"Loaded {len(GAMES_DF)} games", file=sys.stderr)
+    print(f"Loaded {len(TEAM_HISTORIES_DF)} team histories", file=sys.stderr)
+    print(f"Loaded {len(TEAM_STATS_DF)} team statistics records", file=sys.stderr)
     
     # Debug: Show season range in data
     if len(PLAYER_STATS_DF) > 0:
@@ -114,6 +125,25 @@ def find_player(player_name: str):
     
     if match.empty:
         return None
+    
+    return match.iloc[0]
+
+def find_team(team_name: str):
+    """Find team by name, abbreviation, or city (supports partial matches, prioritizes active teams)"""
+    search_term = normalize_name(team_name)
+    
+    # Search in teamName, teamAbbrev, and teamCity
+    match = TEAM_HISTORIES_DF[
+        TEAM_HISTORIES_DF["teamName"].str.lower().str.contains(search_term) |
+        TEAM_HISTORIES_DF["teamAbbrev"].str.lower().str.contains(search_term) |
+        TEAM_HISTORIES_DF["teamCity"].str.lower().str.contains(search_term)
+    ]
+    
+    if match.empty:
+        return None
+    
+    # Sort by seasonActiveTill (null means active) to prioritize current teams
+    match = match.sort_values("seasonActiveTill", ascending=False, na_position='first')
     
     return match.iloc[0]
 
@@ -330,6 +360,100 @@ def get_player_split_stats(
         }
     
     return {"error": f"Invalid split type: {split}"}
+
+
+@mcp.tool()
+def get_team_points_history(
+    team_name: str,
+    season_start: int,
+    season_end: int,
+    max_games: int = 82
+) -> dict:
+    """
+    Get a team's scoring history across multiple seasons.
+    
+    Args:
+        team_name: Team name, abbreviation, or city (e.g., "Lakers", "LAL", "Los Angeles")
+        season_start: Starting season year (e.g., 2021 for 2021-22 season)
+        season_end: Ending season year (e.g., 2024 for 2024-25 season)
+        max_games: Maximum number of most recent games to return (default: 82)
+    
+    Returns:
+        Dictionary with team info and game-by-game scoring data
+    """
+    # Find team
+    team = find_team(team_name)
+    if team is None:
+        return {"error": f"Team '{team_name}' not found"}
+    
+    team_id = team["teamId"]
+    full_team_name = f"{team['teamCity']} {team['teamName']}"
+    
+    # Convert season years to date range
+    start_date = pd.Timestamp(f"{season_start}-10-01")
+    end_date = pd.Timestamp(f"{season_end + 1}-09-30")
+    
+    # Filter team stats by team ID and date range
+    stats = TEAM_STATS_DF[
+        (TEAM_STATS_DF["teamId"] == team_id) &
+        (TEAM_STATS_DF["gameDate"] >= start_date) &
+        (TEAM_STATS_DF["gameDate"] <= end_date) &
+        (TEAM_STATS_DF["teamScore"].notna())
+    ].copy()
+    
+    if stats.empty:
+        return {
+            "team": full_team_name,
+            "team_id": int(team_id),
+            "season_range": f"{season_start}-{season_end}",
+            "games": [],
+            "message": "No games found for this team in the specified seasons"
+        }
+    
+    # Sort by date and take most recent games
+    stats = stats.sort_values("gameDate", ascending=False).head(max_games)
+    stats = stats.sort_values("gameDate")  # Re-sort chronologically
+    
+    # Prepare output
+    games = []
+    for _, row in stats.iterrows():
+        games.append({
+            "date": row["gameDate"].strftime("%Y-%m-%d"),
+            "points": int(row["teamScore"]),
+            "opponent_points": int(row["opponentScore"]),
+            "home": bool(row["home"]),
+            "win": bool(row["win"]),
+            "opponent": f"{row['opponentTeamCity']} {row['opponentTeamName']}",
+            "field_goal_pct": round(row["fieldGoalsPercentage"], 1) if pd.notna(row["fieldGoalsPercentage"]) else 0,
+            "three_point_pct": round(row["threePointersPercentage"], 1) if pd.notna(row["threePointersPercentage"]) else 0,
+            "free_throw_pct": round(row["freeThrowsPercentage"], 1) if pd.notna(row["freeThrowsPercentage"]) else 0
+        })
+    
+    # Calculate summary stats
+    total_points = stats["teamScore"].sum()
+    avg_points = stats["teamScore"].mean()
+    home_games = stats[stats["home"] == 1]
+    away_games = stats[stats["home"] == 0]
+    wins = stats[stats["win"] == 1]
+    
+    return {
+        "team": full_team_name,
+        "team_id": int(team_id),
+        "season_range": f"{season_start}-{season_end}",
+        "total_games": len(games),
+        "summary": {
+            "total_points": int(total_points),
+            "avg_points": round(avg_points, 1),
+            "home_games": len(home_games),
+            "away_games": len(away_games),
+            "home_avg": round(home_games["teamScore"].mean(), 1) if len(home_games) > 0 else 0,
+            "away_avg": round(away_games["teamScore"].mean(), 1) if len(away_games) > 0 else 0,
+            "wins": len(wins),
+            "losses": len(games) - len(wins),
+            "win_pct": round(len(wins) / len(games) * 100, 1) if len(games) > 0 else 0
+        },
+        "games": games
+    }
 
 
 # Load data when server starts
