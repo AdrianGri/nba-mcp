@@ -456,6 +456,113 @@ def get_team_points_history(
     }
 
 
+@mcp.tool()
+def get_stat_history(
+    player_name: str,
+    stat: Literal["points", "rebounds", "assists", "3_pointers", "blocks"],
+    num_past_games: int
+) -> dict:
+    """
+    Get a player's statistics for a specific stat over their last N games.
+    
+    Args:
+        player_name: Player's first name, last name, or full name
+        stat: The stat to retrieve - one of: points, rebounds, assists, 3_pointers, blocks
+        num_past_games: Number of most recent games to retrieve (e.g., 10, 20, 82)
+    
+    Returns:
+        Dictionary with player info and game-by-game stat data
+    """
+    # Find player
+    player = find_player(player_name)
+    if player is None:
+        return {"error": f"Player '{player_name}' not found"}
+    
+    player_id = player["personId"]
+    full_name = player["fullName"]
+    
+    # Map stat parameter to DataFrame column name
+    stat_column_map = {
+        "points": "points",
+        "rebounds": "reboundsTotal",
+        "assists": "assists",
+        "3_pointers": "threePointersMade",
+        "blocks": "blocks"
+    }
+    
+    stat_column = stat_column_map[stat]
+    
+    # Filter player stats (get all games for this player with valid data)
+    stats = PLAYER_STATS_DF[
+        (PLAYER_STATS_DF["personId"] == player_id) &
+        (PLAYER_STATS_DF["minutes_decimal"] > 0) &
+        (PLAYER_STATS_DF[stat_column].notna())
+    ].copy()
+    
+    if stats.empty:
+        return {
+            "player": full_name,
+            "player_id": int(player_id),
+            "stat": stat,
+            "games": [],
+            "message": "No games found for this player"
+        }
+    
+    # Sort by date (most recent first) and take the requested number of games
+    stats = stats.sort_values("gameDate", ascending=False).head(num_past_games)
+    # Re-sort chronologically for display
+    stats = stats.sort_values("gameDate")
+    
+    # Prepare output
+    games = []
+    for _, row in stats.iterrows():
+        game_data = {
+            "date": row["gameDate"].strftime("%Y-%m-%d"),
+            "season": int(row["season"]),
+            "stat_value": int(row[stat_column]),
+            "minutes": round(row["minutes_decimal"], 1),
+            "home": bool(row["home"])
+        }
+        
+        # Add additional context based on stat type
+        if stat == "points":
+            game_data["field_goals"] = f"{int(row['fieldGoalsMade'])}/{int(row['fieldGoalsAttempted'])}"
+            game_data["free_throws"] = f"{int(row['freeThrowsMade'])}/{int(row['freeThrowsAttempted'])}"
+        elif stat == "rebounds":
+            game_data["offensive_rebounds"] = int(row["reboundsOffensive"])
+            game_data["defensive_rebounds"] = int(row["reboundsDefensive"])
+        elif stat == "3_pointers":
+            game_data["three_point_attempts"] = int(row["threePointersAttempted"])
+            game_data["three_point_pct"] = round(
+                (row["threePointersMade"] / row["threePointersAttempted"] * 100), 1
+            ) if row["threePointersAttempted"] > 0 else 0
+        
+        games.append(game_data)
+    
+    # Calculate summary stats
+    stat_values = stats[stat_column]
+    total_stat = stat_values.sum()
+    avg_stat = stat_values.mean()
+    max_stat = stat_values.max()
+    min_stat = stat_values.min()
+    
+    return {
+        "player": full_name,
+        "player_id": int(player_id),
+        "stat": stat,
+        "num_games_requested": num_past_games,
+        "num_games_returned": len(games),
+        "summary": {
+            "total": int(total_stat),
+            "average": round(avg_stat, 1),
+            "max": int(max_stat),
+            "min": int(min_stat),
+            "avg_minutes": round(stats["minutes_decimal"].mean(), 1)
+        },
+        "games": games
+    }
+
+
 # Load data when server starts
 load_data()
 
