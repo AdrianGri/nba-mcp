@@ -24,7 +24,7 @@ Watch the [demo video](demo.mov) to see how the MCP server works with the Claude
 
 ## Dataset
 
-**Source**: [NBA Dataset - Box Scores & Stats, 1947 - Today](https://www.kaggle.com/datasets/wyattowalsh/basketball)
+**Source**: [NBA Dataset - Box Scores & Stats, 1947 - Today](https://www.kaggle.com/datasets/eoinamoore/historical-nba-data-and-player-box-scores/data?select=PlayerStatistics.csv)
 
 The dataset includes comprehensive statistics stored in the `nba-stats/` directory:
 
