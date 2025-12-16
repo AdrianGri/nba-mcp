@@ -148,23 +148,21 @@ def find_team(team_name: str):
     return match.iloc[0]
 
 @mcp.tool()
-def get_player_points_history(
+def get_player_boxscore_history(
     player_name: str,
-    season_start: int,
-    season_end: int,
-    max_games: int = 82
+    opposing_team: str,
+    home: bool = None
 ) -> dict:
     """
-    Get a player's scoring history across multiple seasons.
+    Get a player's complete boxscore stats for their last game(s) against a specific opponent.
     
     Args:
         player_name: Player's first name, last name, or full name
-        season_start: Starting season year (e.g., 2021 for 2021-22 season)
-        season_end: Ending season year (e.g., 2024 for 2024-25 season)
-        max_games: Maximum number of most recent games to return (default: 82)
+        opposing_team: Opposing team name, abbreviation, or city (e.g., "Lakers", "LAL", "Los Angeles")
+        home: Optional filter - True for home games only, False for away games only, None for both
     
     Returns:
-        Dictionary with player info and game-by-game scoring data
+        Dictionary with complete boxscore stats from the last matching game
     """
     # Find player
     player = find_player(player_name)
@@ -174,69 +172,85 @@ def get_player_points_history(
     player_id = player["personId"]
     full_name = player["fullName"]
     
-    # Convert season years to date range (like the notebook does)
-    # Season 2021 means 2021-22 season, which starts in Oct 2021
-    # So we want games from Oct season_start through June season_end+1
-    start_date = pd.Timestamp(f"{season_start}-10-01")
-    end_date = pd.Timestamp(f"{season_end + 1}-09-30")
+    # Find opposing team
+    team = find_team(opposing_team)
+    if team is None:
+        return {"error": f"Team '{opposing_team}' not found"}
     
-    # Filter player stats by player ID and date range (exactly like notebook)
+    opponent_name = f"{team['teamCity']} {team['teamName']}"
+    
+    # Filter player stats by player ID and opponent
+    # The opponent info is in opponentteamCity and opponentteamName columns
     stats = PLAYER_STATS_DF[
         (PLAYER_STATS_DF["personId"] == player_id) &
-        (PLAYER_STATS_DF["gameDate"] >= start_date) &
-        (PLAYER_STATS_DF["gameDate"] <= end_date) &
-        (PLAYER_STATS_DF["minutes_decimal"] > 0) &
-        (PLAYER_STATS_DF["points"].notna())
+        (PLAYER_STATS_DF["opponentteamCity"] == team["teamCity"]) &
+        (PLAYER_STATS_DF["opp" + "onentteamName"] == team["teamName"]) &
+        (PLAYER_STATS_DF["minutes_decimal"] > 0)
     ].copy()
     
+    # Apply home/away filter if specified
+    if home is not None:
+        home_value = 1 if home else 0
+        stats = stats[stats["home"] == home_value]
+    
     if stats.empty:
+        home_msg = " at home" if home is True else " away" if home is False else ""
         return {
             "player": full_name,
             "player_id": int(player_id),
-            "season_range": f"{season_start}-{season_end}",
-            "games": [],
-            "message": "No games found for this player in the specified seasons"
+            "opponent": opponent_name,
+            "message": f"No games found for {full_name} vs {opponent_name}{home_msg}"
         }
     
-    # Sort by date and take most recent games
-    stats = stats.sort_values("gameDate", ascending=False).head(max_games)
-    stats = stats.sort_values("gameDate")  # Re-sort chronologically
+    # Sort by date and get the most recent game
+    stats = stats.sort_values("gameDate", ascending=False)
+    last_game = stats.iloc[0]
     
-    # Prepare output
-    games = []
-    for _, row in stats.iterrows():
-        games.append({
-            "date": row["gameDate"].strftime("%Y-%m-%d"),
-            "season": int(row["season"]),
-            "points": int(row["points"]),
-            "minutes": round(row["minutes_decimal"], 1),
-            "home": bool(row["home"]),
-            "field_goals": f"{int(row['fieldGoalsMade'])}/{int(row['fieldGoalsAttempted'])}",
-            "three_pointers": f"{int(row['threePointersMade'])}/{int(row['threePointersAttempted'])}",
-            "free_throws": f"{int(row['freeThrowsMade'])}/{int(row['freeThrowsAttempted'])}"
-        })
-    
-    # Calculate summary stats
-    total_points = stats["points"].sum()
-    avg_points = stats["points"].mean()
-    home_games = stats[stats["home"] == 1]
-    away_games = stats[stats["home"] == 0]
-    
-    return {
+    # Build comprehensive boxscore
+    boxscore = {
         "player": full_name,
         "player_id": int(player_id),
-        "season_range": f"{season_start}-{season_end}",
-        "total_games": len(games),
-        "summary": {
-            "total_points": int(total_points),
-            "avg_points": round(avg_points, 1),
-            "home_games": len(home_games),
-            "away_games": len(away_games),
-            "home_avg": round(home_games["points"].mean(), 1) if len(home_games) > 0 else 0,
-            "away_avg": round(away_games["points"].mean(), 1) if len(away_games) > 0 else 0
+        "opponent": opponent_name,
+        "date": last_game["gameDate"].strftime("%Y-%m-%d"),
+        "season": int(last_game["season"]),
+        "home": bool(last_game["home"]),
+        "won": bool(last_game["win"]),
+        "minutes": round(last_game["minutes_decimal"], 1),
+        "points": int(last_game["points"]),
+        "rebounds": {
+            "total": int(last_game["reboundsTotal"]),
+            "offensive": int(last_game["reboundsOffensive"]),
+            "defensive": int(last_game["reboundsDefensive"])
         },
-        "games": games
+        "assists": int(last_game["assists"]),
+        "steals": int(last_game["steals"]),
+        "blocks": int(last_game["blocks"]),
+        "turnovers": int(last_game["turnovers"]),
+        "fouls": int(last_game["foulsPersonal"]),
+        "field_goals": {
+            "made": int(last_game["fieldGoalsMade"]),
+            "attempted": int(last_game["fieldGoalsAttempted"]),
+            "percentage": round(last_game["fieldGoalsPercentage"], 1) if pd.notna(last_game["fieldGoalsPercentage"]) else 0
+        },
+        "three_pointers": {
+            "made": int(last_game["threePointersMade"]),
+            "attempted": int(last_game["threePointersAttempted"]),
+            "percentage": round(last_game["threePointersPercentage"], 1) if pd.notna(last_game["threePointersPercentage"]) else 0
+        },
+        "free_throws": {
+            "made": int(last_game["freeThrowsMade"]),
+            "attempted": int(last_game["freeThrowsAttempted"]),
+            "percentage": round(last_game["freeThrowsPercentage"], 1) if pd.notna(last_game["freeThrowsPercentage"]) else 0
+        },
+        "plus_minus": int(last_game["plusMinusPoints"]) if pd.notna(last_game["plusMinusPoints"]) else 0
     }
+    
+    # Add context about how many games they've played against this opponent
+    total_games = len(stats)
+    if total_games > 1:
+        boxscore["note"] = f"This is the most recent of {total_games} games vs {opponent_name}"
+    
+    return boxscore
 
 
 @mcp.tool()
