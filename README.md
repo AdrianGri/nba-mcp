@@ -11,6 +11,10 @@ This project investigates how NBA player performance depends on context and how 
 - Does opponent quality or home court have noticeable effects on scoring or efficiency?
 - How have teams' offensive profiles changed across seasons?
 
+### Demo
+
+Watch the [demo video](demo.mov) to see how the MCP server works with the Claude Desktop app.
+
 ### Core Components
 
 1. **MCP Server** ([nba_local_server.py](nba_local_server.py)) - An intelligent analytics agent that exposes tools for querying NBA statistics via the Model Context Protocol
